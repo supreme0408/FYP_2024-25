@@ -1,0 +1,21 @@
+[
+    {
+        "model": "llama-3.3-70b-versatile",
+        "api_key": "<YOUR_GROQ_API_KEY>",
+        "api_type": "groq"
+    },
+    {
+        "model": "<your Azure OpenAI deployment name>",
+        "api_key": "<your Azure OpenAI API key here>",
+        "base_url": "<your Azure OpenAI API base here>",
+        "api_type": "azure",
+        "api_version": "2024-02-15-preview"
+    },
+    {
+        "model": "<your Azure OpenAI deployment name>",
+        "api_key": "<your Azure OpenAI API key here>",
+        "base_url": "<your Azure OpenAI API base here>",
+        "api_type": "azure",
+        "api_version": "2024-02-15-preview"
+    }
+]

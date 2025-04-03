@@ -77,5 +77,20 @@ library = [
             ReportChartUtils,  # Expert Knowledge for Report Chart Plotting
         ],
     },
+    {
+    "name": "Weather_Analyst",
+    "profile": dedent(
+        f""" As a Weather Analyst, one must have strong analytical skills to interpret rainfall and climate data, be proficient in Python for data processing and visualization, and possess domain knowledge in agriculture to recommend suitable crops based on weather patterns. Effective communication is essential for generating insightful reports and collaborating with stakeholders. Give report with full comprehensive reasoning about the conclusion made.
+        
+        Reply TERMINATE when everything is settled.
+        """),
+        "toolkits": [
+        WeatherAPIUtils.get_monthly_rainfall,
+        WeatherAPIUtils.get_monthly_temperature,
+        ReportWeatherLabUtils.save_generated_report,
+        ReportWeatherLabUtils.build_weather_analysis_report
+    ]
+},
+
 ]
 library = {d["name"]: d for d in library}

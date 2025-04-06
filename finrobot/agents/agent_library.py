@@ -87,6 +87,7 @@ library = [
         "toolkits": [
         WeatherAPIUtils.get_monthly_rainfall,
         WeatherAPIUtils.get_monthly_temperature,
+        TextUtils.check_text_length,
         ReportWeatherLabUtils.save_generated_report,
         ReportWeatherLabUtils.build_weather_analysis_report
     ]

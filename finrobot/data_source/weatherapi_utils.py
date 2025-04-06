@@ -34,11 +34,11 @@ class WeatherAPIUtils:
         return None
 
     @staticmethod
-    def save_data(df: Annotated[pd.DataFrame, "DataFrame to be saved"], filename: Annotated[str, "File name for saving data"]):
+    def save_data(df: Annotated[pd.DataFrame, "DataFrame to be saved"],  save_path: Annotated[str, "Folder Path to save data in current working directory"],filename: Annotated[str, "File name for saving data"]):
         """Saves the DataFrame to a CSV file."""
-        if not os.path.exists(WeatherAPIUtils.DATA_DIR):
-            os.makedirs(WeatherAPIUtils.DATA_DIR)
-        file_path = os.path.join(WeatherAPIUtils.DATA_DIR, filename)
+        if not os.path.exists(save_path):
+            os.makedirs(save_path)
+        file_path = os.path.join(save_path, filename)
         df.to_csv(file_path, index=False)
 
     @staticmethod
@@ -75,7 +75,7 @@ class WeatherAPIUtils:
             monthly_rainfall.append([f"{year}-{month:02d}", monthly_avg_rainfall])
 
         df = pd.DataFrame(monthly_rainfall, columns=["Month", "Average Rainfall (mm)"])
-        WeatherAPIUtils.save_data(df, filename)
+        WeatherAPIUtils.save_data(df, save_path,filename)
         return df
 
     @staticmethod
@@ -116,5 +116,5 @@ class WeatherAPIUtils:
             monthly_data.append([f"{year}-{month:02d}", avg_temp, avg_radiation])
 
         df = pd.DataFrame(monthly_data, columns=["Month", "Average Temperature (°C)", "Average Shortwave Radiation (W/m²)"])
-        WeatherAPIUtils.save_data(df, filename)
+        WeatherAPIUtils.save_data(df, save_path,filename)
         return df

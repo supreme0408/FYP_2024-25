@@ -1,2 +1,4 @@
-./tutorial_script/weather_report1
-./tutorial_script/weather_report3
+tutorial_script/weather_report1/
+tutorial_script/weather_report3/
+finrobot/__pycache__/
+finrobot/.ipynb_checkpoints/

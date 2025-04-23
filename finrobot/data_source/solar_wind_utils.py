@@ -22,6 +22,9 @@ import pandas as pd
 import numpy as np
 from io import BytesIO
 import base64
+from dotenv import load_dotenv
+
+load_dotenv()
 
 class SolarWind:
     """
@@ -32,7 +35,7 @@ class SolarWind:
     # Constants
     VERSION = "3.0.0"
     NAME = "SolarWind Renewable Energy Assessment Tool"
-    OPENWEATHERMAP_API_KEY = "3debd8fec55dfc7d852be72d1381fd8f"
+    OPENWEATHERMAP_API_KEY = os.getenv("OPENWEATHERMAP_API_KEY")
     OPEN_METEO_BASE_URL = "https://api.open-meteo.com/v1/forecast"
     OPENWEATHERMAP_BASE_URL = "https://api.openweathermap.org/data"
     

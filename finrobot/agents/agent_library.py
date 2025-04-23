@@ -85,11 +85,13 @@ library = [
         Reply TERMINATE when everything is settled.
         """),
         "toolkits": [
-        WeatherAPIUtils.get_monthly_rainfall,
+        WeatherAPIUtils.new_get_monthly_rainfall,
         WeatherAPIUtils.get_monthly_temperature,
+        AgriInfoService.get_soil_info,
+        AgriInfoService.get_crop_info,
+        AgriInfoService.get_soil_crop_compatibility,
         TextUtils.check_text_length,
-        ReportWeatherLabUtils.save_generated_report,
-        ReportWeatherLabUtils.build_weather_analysis_report
+        ReportWeatherLabUtils.build_structured_analysis_report
     ]
 },
 

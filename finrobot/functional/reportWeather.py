@@ -1,5 +1,6 @@
 import os
 import traceback
+import pandas as pd
 import csv
 from reportlab.lib import colors, pagesizes
 from reportlab.platypus import (
@@ -11,6 +12,11 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT
 from typing import Annotated
 from ..data_source.WeatherAnalysisInsights import WeatherAnalysisInsights
+import matplotlib.pyplot as plt
+import seaborn as sns
+from io import BytesIO
+from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
+from PIL import Image as PILImage
 
 
 class ReportWeatherLabUtils:
@@ -154,6 +160,56 @@ class ReportWeatherLabUtils:
         except Exception:
             return traceback.format_exc()
 
+    def create_dashboard_pdf_page(rainfall_df, temperature_df):
+        # Clean column names
+        rainfall_df.columns = rainfall_df.columns.str.replace(r'Â', '', regex=True)
+        temperature_df.columns = temperature_df.columns.str.replace(r'Â', '', regex=True)
+
+        # Set plot style
+        sns.set(style="whitegrid")
+
+        # Create figure for the dashboard
+        fig, axs = plt.subplots(2, 2, figsize=(16, 12))  # 2x2 grid for 4 plots
+
+        # Plot 1: Stacked Rainfall
+        axs[0, 0].bar(rainfall_df['Month'], rainfall_df['Total Rainfall (mm)'], label='Total', color='steelblue')
+        axs[0, 0].bar(rainfall_df['Month'], rainfall_df['Median Rainfall (mm)'],
+                    bottom=rainfall_df['Total Rainfall (mm)'], label='Median', color='lightgreen')
+        axs[0, 0].bar(rainfall_df['Month'], rainfall_df['Max Rainfall (mm)'],
+                    bottom=rainfall_df['Total Rainfall (mm)'] + rainfall_df['Median Rainfall (mm)'],
+                    label='Max', color='tomato')
+        axs[0, 0].set_title('Stacked Rainfall Comparison')
+        axs[0, 0].set_xlabel('Month')
+        axs[0, 0].set_ylabel('Rainfall (mm)')
+        axs[0, 0].tick_params(axis='x', rotation=45)
+        axs[0, 0].legend()
+
+        # Plot 2: Rainy Days
+        sns.barplot(x='Month', y='Rainy Days Count', data=rainfall_df, palette='crest', ax=axs[0, 1])
+        axs[0, 1].set_title('Rainy Days Count per Month')
+        axs[0, 1].tick_params(axis='x', rotation=45)
+
+        # Plot 3: Temp vs Month
+        sns.lineplot(x='Month', y='Average Temperature (°C)', data=temperature_df, marker='o',
+                    color='orange', linewidth=2, ax=axs[1, 0])
+        temperature_df['Rolling Avg Temp'] = temperature_df['Average Temperature (°C)'].rolling(window=2).mean()
+        axs[1, 0].plot(temperature_df['Month'], temperature_df['Rolling Avg Temp'], label='Rolling Avg', color='purple')
+        axs[1, 0].set_title('Temperature with Rolling Average')
+        axs[1, 0].tick_params(axis='x', rotation=45)
+        axs[1, 0].legend()
+
+        # Plot 4: Temp vs Radiation
+        sns.regplot(x='Average Temperature (°C)', y='Average Shortwave Radiation (W/m²)', data=temperature_df,
+                    scatter_kws={'s': 100, 'color': 'darkcyan'}, line_kws={'color': 'red'}, ax=axs[1, 1])
+        axs[1, 1].set_title('Temp vs Shortwave Radiation')
+
+        # Layout and convert to BytesIO
+        plt.tight_layout()
+        buffer = BytesIO()
+        FigureCanvas(fig).print_png(buffer)
+        plt.close(fig)
+        buffer.seek(0)
+        return buffer
 
     def build_structured_analysis_report(
         location: Annotated[str, "Geographical location for the weather analysis"],
@@ -175,14 +231,6 @@ class ReportWeatherLabUtils:
             os.makedirs(os.path.dirname(pdf_path), exist_ok=True)
             doc = SimpleDocTemplate(pdf_path, pagesize=pagesizes.A4)
     
-            # # Define frames for layout
-            # frame_left = Frame(margin, margin, page_width * 2 / 3 - margin * 2, page_height - margin * 2, id="left")
-            # frame_right = Frame(page_width * 2 / 3, margin, page_width / 3 - margin * 2, page_height - margin * 2, id="right")
-            # single_frame = Frame(margin, margin, page_width - margin * 2, page_height - margin * 2, id="single")
-    
-            # page_template = PageTemplate(id="TwoColumns", frames=[frame_left, frame_right])
-            # single_column_layout = PageTemplate(id="OneCol", frames=[single_frame])
-            # doc.addPageTemplates([page_template, single_column_layout])
             single_frame = Frame(
                 margin,                      # x
                 margin,                      # y
@@ -200,7 +248,17 @@ class ReportWeatherLabUtils:
             title_style = ParagraphStyle(name="Title", parent=styles["Title"], fontName="Helvetica-Bold", fontSize=16, leading=20, alignment=TA_LEFT, spaceAfter=10)
             subtitle_style = ParagraphStyle(name="Subtitle", parent=styles["Heading2"], fontName="Helvetica-Bold", fontSize=14, leading=12, alignment=TA_LEFT, spaceAfter=6)
             body_style = ParagraphStyle(name="Body", parent=styles["Normal"], fontName="Helvetica", fontSize=10, alignment=TA_JUSTIFY)
-    
+
+            style = TableStyle([
+                    ('BACKGROUND', (0, 0), (-1, 0), colors.lightblue),
+                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
+                    ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                    ('GRID', (0, 0), (-1, -1), 1, colors.black),
+                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+                    ('FONTSIZE', (0, 0), (-1, -1), 10),
+                    ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+                ])
+            
             # Content for PDF
             content = []
             content.append(Paragraph(f"Weather Analysis Report: {location}", title_style))
@@ -226,19 +284,9 @@ class ReportWeatherLabUtils:
             rainfall_filename = f"rainfall_{location.replace(' ', '_')}_{year}.csv"
             rainfall_csv_path = os.path.join(save_path, rainfall_filename)
             if os.path.exists(rainfall_csv_path):
-                with open(rainfall_csv_path, 'r') as file:
-                    reader = csv.reader(file)
-                    rainfall_data = [row for row in reader]
-                rainfall_table = Table(rainfall_data)
-                style = TableStyle([
-                    ('BACKGROUND', (0, 0), (-1, 0), colors.lightblue),
-                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.white),
-                    ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
-                    ('GRID', (0, 0), (-1, -1), 1, colors.black),
-                    ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-                    ('FONTSIZE', (0, 0), (-1, -1), 10),
-                    ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
-                ])
+                rainfall_data_df = pd.read_csv(rainfall_csv_path)
+                rainfall_data_to_list = [rainfall_data_df.columns.tolist()] + rainfall_data_df.values.tolist()
+                rainfall_table = Table(rainfall_data_to_list)
                 rainfall_table.setStyle(style)
                 content.append(rainfall_table)
     
@@ -247,12 +295,34 @@ class ReportWeatherLabUtils:
             temperature_filename = f"temperature_{location.replace(' ', '_')}_{year}.csv"
             temperature_csv_path = os.path.join(save_path, temperature_filename)
             if os.path.exists(temperature_csv_path):
-                with open(temperature_csv_path, 'r') as file:
-                    reader = csv.reader(file)
-                    temp_data = [row for row in reader]
-                temperature_table = Table(temp_data)
+                temp_data_df = pd.read_csv(temperature_csv_path)
+                temp_data_to_list = [temp_data_df.columns.tolist()] + temp_data_df.values.tolist()
+                temperature_table = Table(temp_data_to_list)
                 temperature_table.setStyle(style)
                 content.append(temperature_table)
+            
+            content.append(PageBreak())                
+
+            content.append(Paragraph("Data Summary", subtitle_style))
+            img_buffer = ReportWeatherLabUtils.create_dashboard_pdf_page(rainfall_data_df, temp_data_df)
+            
+            # Step 2: Load the image using PIL to get actual dimensions
+            pil_img = PILImage.open(img_buffer)
+            img_width, img_height = pil_img.size
+
+            # Step 3: Calculate new dimensions to fit A4 width while keeping aspect ratio
+            a4_width_points = page_width - 2 * margin  # subtracting margins
+            aspect_ratio = img_height / img_width
+            new_width = a4_width_points
+            new_height = new_width * aspect_ratio
+
+            # Step 4: Rewind buffer and create ReportLab Image
+            img_buffer.seek(0)
+            img = Image(img_buffer, width=new_width, height=new_height)
+            content.append(img)
+
+            image_save_path = os.path.join(save_path, "data_summary_plot.png")
+            pil_img.save(image_save_path) 
     
             # Build the PDF
             doc.build(content)

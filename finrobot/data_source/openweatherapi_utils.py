@@ -1,13 +1,11 @@
 import requests
-import pandas as pd
 import math
-import requests
-from PIL import Image
-from io import BytesIO
-import os
 import time
+import statistics
 from datetime import datetime, timedelta
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, Any, List, Union
+from collections import Counter
+
 WEATHER_CODE_MAP = {
     # Thunderstorm Group 2xx
     200: 'Thunderstorm with light rain',
@@ -109,71 +107,317 @@ class OpenWeatherAPI:
         return None
 
     @staticmethod
-    def get_current_weather(city_name: str, state_code: Optional[str] = None, country_code: Optional[str] = None) -> Optional[dict]:
-        """Gets current weather data for a specified location."""
+    def get_current_weather(city_name: str, state_code: Optional[str] = None, country_code: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Gets current weather data for a specified location.
+        
+        Returns:
+            JSON object with current weather data or None if location not found
+        """
         coords = OpenWeatherAPI.get_coordinates(city_name, state_code, country_code)
         if not coords:
             return None
         lat, lon = coords
         params = {'lat': lat, 'lon': lon, 'units': 'metric'}
 
-        return OpenWeatherAPI.fetch_weather_data('weather', params)
+        data = OpenWeatherAPI.fetch_weather_data('weather', params)
+        if data and 'weather' in data and len(data['weather']) > 0:
+            # Add the weather description from our map
+            weather_id = data['weather'][0]['id']
+            data['weather_description'] = WEATHER_CODE_MAP.get(weather_id, data['weather'][0]['description'])
+        
+        return data
 
     @staticmethod
-    def get_hourly_forecast(city_name: str, state_code: Optional[str] = None, country_code: Optional[str] = None) -> Optional[pd.DataFrame]:
-        """Gets hourly weather forecast for the next 48 hours for a specified location."""
+    def get_mode_weather(weather_list: List[Dict]) -> Dict:
+        """Gets the most common weather condition from a list of weather data"""
+        if not weather_list:
+            return {}
+            
+        weather_ids = [item['id'] for item in weather_list]
+        if not weather_ids:
+            return {}
+            
+        most_common_id = Counter(weather_ids).most_common(1)[0][0]
+        
+        # Find the first weather item with this ID
+        for item in weather_list:
+            if item['id'] == most_common_id:
+                return {
+                    'id': item['id'],
+                    'main': item['main'],
+                    'description': item['description'],
+                    'icon': item['icon'],
+                    'readable_description': WEATHER_CODE_MAP.get(item['id'], item['description'])
+                }
+                
+        return {}
+
+    @staticmethod
+    def get_hourly_forecast_condensed(city_name: str, state_code: Optional[str] = None, country_code: Optional[str] = None,
+                                     interval_hours: int = 6) -> Optional[Dict[str, Any]]:
+        """Gets condensed hourly weather forecast grouped into specified intervals.
+        
+        Args:
+            city_name: Name of the city
+            state_code: State code (optional)
+            country_code: Country code (optional)
+            interval_hours: Number of hours to group forecasts by (default: 6)
+            
+        Returns:
+            Condensed JSON with hourly forecast grouped by time intervals
+        """
         coords = OpenWeatherAPI.get_coordinates(city_name, state_code, country_code)
         if not coords:
             return None
         lat, lon = coords
         params = {'lat': lat, 'lon': lon, 'units': 'metric'}
         data = OpenWeatherAPI.fetch_weather_data('forecast', params)
+        
         if not data or 'list' not in data:
             return None
-        forecast_data = data['list']
-        df = pd.DataFrame(forecast_data)
-        df['dt'] = pd.to_datetime(df['dt'], unit='s')
-        # Extract temperature from the 'main' column which is a dict in each row
-        df['temp'] = df['main'].apply(lambda x: x['temp'] if isinstance(x, dict) else None)
-        df['weather_description'] = df['weather'].apply(
-        lambda x: WEATHER_CODE_MAP.get(x[0]['id']) if isinstance(x, list) and 'id' in x[0] else None
-    )
-        return df[['dt', 'temp', 'weather', 'weather_description']]
-
+            
+        # Group forecast data by intervals
+        intervals = {}
+        city_info = data.get('city', {})
+        
+        for forecast_item in data['list']:
+            dt = datetime.fromtimestamp(forecast_item['dt'])
+            
+            # Create interval key (e.g., "2025-04-29 00:00" for a 6-hour interval starting at midnight)
+            interval_start = dt.replace(hour=(dt.hour // interval_hours) * interval_hours, minute=0, second=0)
+            interval_key = interval_start.strftime("%Y-%m-%d %H:%M")
+            
+            if interval_key not in intervals:
+                intervals[interval_key] = {
+                    'start_time': interval_start.isoformat(),
+                    'end_time': (interval_start + timedelta(hours=interval_hours)).isoformat(),
+                    'temperatures': [],
+                    'feels_like': [],
+                    'humidity': [],
+                    'pressure': [],
+                    'wind_speed': [],
+                    'weather_items': []
+                }
+            
+            # Collect data for statistics
+            intervals[interval_key]['temperatures'].append(forecast_item['main']['temp'])
+            intervals[interval_key]['feels_like'].append(forecast_item['main']['feels_like'])
+            intervals[interval_key]['humidity'].append(forecast_item['main']['humidity'])
+            intervals[interval_key]['pressure'].append(forecast_item['main']['pressure'])
+            if 'wind' in forecast_item and 'speed' in forecast_item['wind']:
+                intervals[interval_key]['wind_speed'].append(forecast_item['wind']['speed'])
+            
+            # Collect weather conditions
+            if 'weather' in forecast_item and forecast_item['weather']:
+                intervals[interval_key]['weather_items'].extend(forecast_item['weather'])
+        
+        # Calculate statistics for each interval
+        summarized_intervals = []
+        for interval_key, data in intervals.items():
+            # Find most common weather condition
+            weather_summary = OpenWeatherAPI.get_mode_weather(data['weather_items'])
+            
+            interval_summary = {
+                'interval': interval_key,
+                'start_time': data['start_time'],
+                'end_time': data['end_time'],
+                'temperature': {
+                    'avg': round(statistics.mean(data['temperatures']), 1),
+                    'min': round(min(data['temperatures']), 1),
+                    'max': round(max(data['temperatures']), 1)
+                },
+                'feels_like': round(statistics.mean(data['feels_like']), 1),
+                'humidity': round(statistics.mean(data['humidity'])),
+                'pressure': round(statistics.mean(data['pressure'])),
+                'weather': weather_summary
+            }
+            
+            if data['wind_speed']:
+                interval_summary['wind_speed'] = round(statistics.mean(data['wind_speed']), 1)
+                
+            summarized_intervals.append(interval_summary)
+        
+        # Sort intervals by start time
+        summarized_intervals.sort(key=lambda x: x['start_time'])
+        
+        return {
+            'city': city_info,
+            'intervals': summarized_intervals,
+            'interval_hours': interval_hours
+        }
 
     @staticmethod
-    def get_daily_forecast(city_name: str, state_code: Optional[str] = None, country_code: Optional[str] = None, cnt: int = 7) -> Optional[pd.DataFrame]:
-        """Gets daily weather forecast for a specified number of days for a given location."""
+    def get_daily_forecast_condensed(city_name: str, state_code: Optional[str] = None, country_code: Optional[str] = None, cnt: int = 7) -> Optional[Dict[str, Any]]:
+        """Gets condensed daily weather forecast for a specified number of days.
+        
+        Args:
+            city_name: Name of the city
+            state_code: State code (optional) 
+            country_code: Country code (optional)
+            cnt: Number of days to forecast (default: 7)
+            
+        Returns:
+            Condensed JSON with daily forecast summary
+        """
         coords = OpenWeatherAPI.get_coordinates(city_name, state_code, country_code)
         if not coords:
             return None
         lat, lon = coords
         params = {'lat': lat, 'lon': lon, 'cnt': cnt, 'units': 'metric'}
         data = OpenWeatherAPI.fetch_weather_data('forecast/daily', params)
+        
         if not data or 'list' not in data:
-            return None
-        forecast_data = data['list']
-        df = pd.DataFrame(forecast_data)
-        df['dt'] = pd.to_datetime(df['dt'], unit='s')
-        # Extract temperature details from nested 'temp' dictionary
-        df['day_temp'] = df['temp'].apply(lambda x: x.get('day') if isinstance(x, dict) else None)
-        df['min_temp'] = df['temp'].apply(lambda x: x.get('min') if isinstance(x, dict) else None)
-        df['max_temp'] = df['temp'].apply(lambda x: x.get('max') if isinstance(x, dict) else None)
-        df['weather_description'] = df['weather'].apply(
-        lambda x: WEATHER_CODE_MAP.get(x[0]['id']) if isinstance(x, list) and 'id' in x[0] else None
-    )
-
-        return df[['dt', 'day_temp', 'min_temp', 'max_temp', 'weather','weather_description']]
-
+            # Try using hourly forecast API to create daily aggregates if daily API fails
+            return OpenWeatherAPI._create_daily_forecast_from_hourly(city_name, state_code, country_code, cnt)
+            
+        daily_forecast = []
+        city_info = data.get('city', {})
+        
+        for forecast_item in data['list']:
+            dt = datetime.fromtimestamp(forecast_item['dt'])
+            date_str = dt.strftime("%Y-%m-%d")
+            
+            # Extract main weather condition
+            weather_summary = {}
+            if 'weather' in forecast_item and forecast_item['weather']:
+                weather_id = forecast_item['weather'][0]['id']
+                weather_summary = {
+                    'id': weather_id,
+                    'main': forecast_item['weather'][0]['main'],
+                    'description': forecast_item['weather'][0]['description'],
+                    'icon': forecast_item['weather'][0]['icon'],
+                    'readable_description': WEATHER_CODE_MAP.get(weather_id, forecast_item['weather'][0]['description'])
+                }
+            
+            # Create daily summary
+            day_summary = {
+                'date': date_str,
+                'day_of_week': dt.strftime("%A"),
+                'temperature': {
+                    'day': round(forecast_item['temp']['day'], 1) if isinstance(forecast_item.get('temp'), dict) else None,
+                    'min': round(forecast_item['temp']['min'], 1) if isinstance(forecast_item.get('temp'), dict) else None,
+                    'max': round(forecast_item['temp']['max'], 1) if isinstance(forecast_item.get('temp'), dict) else None,
+                    'night': round(forecast_item['temp']['night'], 1) if isinstance(forecast_item.get('temp'), dict) else None,
+                },
+                'feels_like': {
+                    'day': round(forecast_item['feels_like']['day'], 1) if isinstance(forecast_item.get('feels_like'), dict) else None,
+                    'night': round(forecast_item['feels_like']['night'], 1) if isinstance(forecast_item.get('feels_like'), dict) else None
+                },
+                'humidity': forecast_item.get('humidity'),
+                'pressure': forecast_item.get('pressure'),
+                'weather': weather_summary
+            }
+            
+            if 'wind_speed' in forecast_item:
+                day_summary['wind_speed'] = round(forecast_item['wind_speed'], 1)
+                
+            daily_forecast.append(day_summary)
+        
+        return {
+            'city': city_info,
+            'daily': daily_forecast
+        }
 
     @staticmethod
-    def get_historical_weather(city_name: str, state_code: Optional[str] = None, country_code: Optional[str] = None, start_date: str = None, end_date: str = None) -> Optional[pd.DataFrame]:
+    def _create_daily_forecast_from_hourly(city_name: str, state_code: Optional[str] = None, country_code: Optional[str] = None, cnt: int = 7) -> Optional[Dict[str, Any]]:
+        """Creates daily forecast by aggregating hourly forecast data when daily API is unavailable"""
         coords = OpenWeatherAPI.get_coordinates(city_name, state_code, country_code)
         if not coords:
             return None
         lat, lon = coords
+        params = {'lat': lat, 'lon': lon, 'units': 'metric'}
+        data = OpenWeatherAPI.fetch_weather_data('forecast', params)
+        
+        if not data or 'list' not in data:
+            return None
+            
+        # Group forecast data by day
+        days = {}
+        city_info = data.get('city', {})
+        
+        for forecast_item in data['list']:
+            dt = datetime.fromtimestamp(forecast_item['dt'])
+            day_key = dt.strftime("%Y-%m-%d")
+            
+            if day_key not in days:
+                days[day_key] = {
+                    'date': day_key,
+                    'day_of_week': dt.strftime("%A"),
+                    'temperatures': [],
+                    'feels_like': [],
+                    'humidity': [],
+                    'pressure': [],
+                    'wind_speed': [],
+                    'weather_items': []
+                }
+            
+            # Collect data for statistics
+            days[day_key]['temperatures'].append(forecast_item['main']['temp'])
+            days[day_key]['feels_like'].append(forecast_item['main']['feels_like'])
+            days[day_key]['humidity'].append(forecast_item['main']['humidity'])
+            days[day_key]['pressure'].append(forecast_item['main']['pressure'])
+            if 'wind' in forecast_item and 'speed' in forecast_item['wind']:
+                days[day_key]['wind_speed'].append(forecast_item['wind']['speed'])
+            
+            # Collect weather conditions
+            if 'weather' in forecast_item and forecast_item['weather']:
+                days[day_key]['weather_items'].extend(forecast_item['weather'])
+        
+        # Calculate statistics for each day
+        daily_forecast = []
+        for _, day_data in sorted(days.items())[:cnt]:  # Limit to requested number of days
+            # Find most common weather condition
+            weather_summary = OpenWeatherAPI.get_mode_weather(day_data['weather_items'])
+            
+            day_summary = {
+                'date': day_data['date'],
+                'day_of_week': day_data['day_of_week'],
+                'temperature': {
+                    'avg': round(statistics.mean(day_data['temperatures']), 1),
+                    'min': round(min(day_data['temperatures']), 1),
+                    'max': round(max(day_data['temperatures']), 1)
+                },
+                'feels_like': round(statistics.mean(day_data['feels_like']), 1),
+                'humidity': round(statistics.mean(day_data['humidity'])),
+                'pressure': round(statistics.mean(day_data['pressure'])),
+                'weather': weather_summary
+            }
+            
+            if day_data['wind_speed']:
+                day_summary['wind_speed'] = round(statistics.mean(day_data['wind_speed']), 1)
+                
+            daily_forecast.append(day_summary)
+        
+        return {
+            'city': city_info,
+            'daily': daily_forecast
+        }
+
+    @staticmethod
+    def get_historical_weather_condensed(city_name: str, state_code: Optional[str] = None, country_code: Optional[str] = None, 
+                                       start_date: str = None, end_date: str = None, 
+                                       interval_hours: int = 24) -> Optional[Dict[str, Any]]:
+        """Gets condensed historical weather data for a specific date range.
+        
+        Args:
+            city_name: Name of the city
+            state_code: State code (optional)
+            country_code: Country code (optional) 
+            start_date: Start date in YYYY-MM-DD format
+            end_date: End date in YYYY-MM-DD format
+            interval_hours: Hours to group data by (default: 24 for daily)
+            
+        Returns:
+            Condensed JSON with historical weather data or None if location not found
+        """
+        coords = OpenWeatherAPI.get_coordinates(city_name, state_code, country_code)
+        if not coords:
+            return None
+        lat, lon = coords
+        
         start_timestamp = int(datetime.strptime(start_date, "%Y-%m-%d").timestamp())
         end_timestamp = int(datetime.strptime(end_date, "%Y-%m-%d").timestamp())
+        
         params = {
             'lat': lat,
             'lon': lon,
@@ -183,44 +427,171 @@ class OpenWeatherAPI:
             'appid': OpenWeatherAPI.API_KEY,
             'units': 'metric'
         }
+        
         response = requests.get("http://history.openweathermap.org/data/2.5/history/city", params=params)
         if response.status_code != 200:
             return None
+            
         data = response.json()
         if 'list' not in data:
             return None
-        df = pd.DataFrame(data['list'])
-        df['dt'] = pd.to_datetime(df['dt'], unit='s')
-        df['temp'] = df['main'].apply(lambda x: x.get('temp') if isinstance(x, dict) else None)
-        df['weather_description'] = df['weather'].apply(
-            lambda x: WEATHER_CODE_MAP.get(x[0]['id']) if isinstance(x, list) and 'id' in x[0] else None
-        )
-        return df[['dt', 'temp', 'weather', 'weather_description']]
+        
+        # Group data by intervals
+        intervals = {}
+        city_info = data.get('city', {})
+        
+        for item in data['list']:
+            dt = datetime.fromtimestamp(item['dt'])
+            
+            if interval_hours == 24:  # Daily intervals
+                interval_key = dt.strftime("%Y-%m-%d")
+                interval_start = dt.replace(hour=0, minute=0, second=0)
+            else:  # Custom hour intervals
+                interval_start = dt.replace(hour=(dt.hour // interval_hours) * interval_hours, minute=0, second=0)
+                interval_key = interval_start.strftime("%Y-%m-%d %H:%M")
+            
+            if interval_key not in intervals:
+                intervals[interval_key] = {
+                    'start_time': interval_start.isoformat(),
+                    'end_time': (interval_start + timedelta(hours=interval_hours)).isoformat(),
+                    'temperatures': [],
+                    'humidity': [],
+                    'pressure': [],
+                    'wind_speed': [],
+                    'weather_items': []
+                }
+            
+            # Collect data for statistics
+            if 'main' in item:
+                if 'temp' in item['main']:
+                    intervals[interval_key]['temperatures'].append(item['main']['temp'])
+                if 'humidity' in item['main']:
+                    intervals[interval_key]['humidity'].append(item['main']['humidity'])
+                if 'pressure' in item['main']:
+                    intervals[interval_key]['pressure'].append(item['main']['pressure'])
+            
+            if 'wind' in item and 'speed' in item['wind']:
+                intervals[interval_key]['wind_speed'].append(item['wind']['speed'])
+            
+            # Collect weather conditions
+            if 'weather' in item and item['weather']:
+                intervals[interval_key]['weather_items'].extend(item['weather'])
+        
+        # Calculate statistics for each interval
+        summarized_intervals = []
+        for interval_key, interval_data in sorted(intervals.items()):
+            # Find most common weather condition
+            weather_summary = OpenWeatherAPI.get_mode_weather(interval_data['weather_items'])
+            
+            interval_summary = {
+                'interval': interval_key,
+                'start_time': interval_data['start_time'],
+                'end_time': interval_data['end_time'],
+                'weather': weather_summary
+            }
+            
+            # Add temperature statistics if available
+            if interval_data['temperatures']:
+                interval_summary['temperature'] = {
+                    'avg': round(statistics.mean(interval_data['temperatures']), 1),
+                    'min': round(min(interval_data['temperatures']), 1),
+                    'max': round(max(interval_data['temperatures']), 1)
+                }
+            
+            # Add other statistics if available
+            if interval_data['humidity']:
+                interval_summary['humidity'] = round(statistics.mean(interval_data['humidity']))
+            
+            if interval_data['pressure']:
+                interval_summary['pressure'] = round(statistics.mean(interval_data['pressure']))
+            
+            if interval_data['wind_speed']:
+                interval_summary['wind_speed'] = round(statistics.mean(interval_data['wind_speed']), 1)
+                
+            summarized_intervals.append(interval_summary)
+        
+        return {
+            'city': {'name': city_name, 'coord': {'lat': lat, 'lon': lon}},
+            'intervals': summarized_intervals,
+            'interval_hours': interval_hours,
+            'period': {
+                'start_date': start_date,
+                'end_date': end_date
+            }
+        }
 
     @staticmethod
-    def get_air_pollution(city_name: str, state_code: Optional[str] = None, country_code: Optional[str] = None) -> Optional[pd.DataFrame]:
-        """Gets current air pollution data for a specified location."""
+    def get_air_pollution_condensed(city_name: str, state_code: Optional[str] = None, country_code: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Gets condensed air pollution data for a specified location.
+        
+        Returns:
+            Condensed JSON with air pollution data or None if location not found
+        """
         coords = OpenWeatherAPI.get_coordinates(city_name, state_code, country_code)
         if not coords:
             return None
         lat, lon = coords
+        
         params = {
             'lat': lat,
             'lon': lon,
             'appid': OpenWeatherAPI.API_KEY
         }
-        response = requests.get("http://api.openweathermap.org/data/2.5/air_pollution", params=params)
+        
+        response = requests.get(OpenWeatherAPI.AIR_POLLUTION_URL, params=params)
         if response.status_code != 200:
             return None
+            
         data = response.json()
-        if 'list' not in data:
+        if 'list' not in data or not data['list']:
             return None
+        
+        # Get the most recent air pollution data
         pollution_info = data['list'][0]
-        df = pd.json_normalize(pollution_info)
-        return df
+        
+        # AQI description mapper
+        aqi_descriptions = {
+            1: "Good",
+            2: "Fair",
+            3: "Moderate",
+            4: "Poor",
+            5: "Very Poor"
+        }
+        
+        # Create condensed output
+        result = {
+            'location': {
+                'name': city_name,
+                'coord': {'lat': lat, 'lon': lon}
+            },
+            'timestamp': datetime.fromtimestamp(pollution_info['dt']).isoformat(),
+            'air_quality_index': pollution_info['main']['aqi'],
+            'air_quality_level': aqi_descriptions.get(pollution_info['main']['aqi'], "Unknown"),
+            'components': {}
+        }
+        
+        # Add components with descriptions
+        component_descriptions = {
+            'co': 'Carbon monoxide',
+            'no': 'Nitrogen monoxide',
+            'no2': 'Nitrogen dioxide',
+            'o3': 'Ozone',
+            'so2': 'Sulphur dioxide',
+            'pm2_5': 'Fine particles (PM2.5)',
+            'pm10': 'Coarse particles (PM10)',
+            'nh3': 'Ammonia'
+        }
+        
+        for component, value in pollution_info['components'].items():
+            result['components'][component] = {
+                'value': value,
+                'name': component_descriptions.get(component, component)
+            }
+        
+        return result
 
-
-    def get_tile_coordinates(self, lat, lng, zoom):
+    @staticmethod
+    def get_tile_coordinates(lat: float, lng: float, zoom: int) -> Tuple[int, int]:
         """
         Calculates the tile x and y coordinates for a given latitude, longitude, and zoom level.
 
@@ -230,11 +601,10 @@ class OpenWeatherAPI:
             zoom: The zoom level.
 
         Returns:
-            A dictionary containing the zoom level, tile x, tile y, pixel x, and pixel y coordinates.
+            A tuple containing the tile x and y coordinates
         """
         TILE_SIZE = 256
         
-
         # Project the latitude and longitude to world coordinates
         siny = math.sin(lat * math.pi / 180)
         siny = min(max(siny, -0.9999), 0.9999)  # Clamp to avoid issues at extreme latitudes
@@ -253,44 +623,46 @@ class OpenWeatherAPI:
         tile_coordinate_x = math.floor(pixel_coordinate_x / TILE_SIZE)
         tile_coordinate_y = math.floor(pixel_coordinate_y / TILE_SIZE)
 
-        return tile_coordinate_x,tile_coordinate_y
+        return tile_coordinate_x, tile_coordinate_y
 
     @staticmethod
     def get_weather_map_url(
-        self,
-        layer: str,
-        z: int = 0,
-        x: float = 21,
-        y: float = 79,
+        lat: float,
+        lng: float,
+        layer: str = "TA2",
+        zoom: int = 4,
         date: int = None,
         opacity: float = 0.8,
         palette: str = None,
         fill_bound: bool = False,
         arrow_step: int = None,
         use_norm: bool = False
-    ) -> str:
+    ) -> Dict[str, Any]:
         """
         Get weather map tile URL from OpenWeather Maps 2.0 API.
 
         Parameters:
-            layer (str): Weather map layer (e.g., 'TA2', 'PA0', 'WND', etc.).
-            z (int): Zoom level.
-            x (Float): Latitude.
-            y (Float): Longitude.
-            date (int, optional): Unix timestamp (UTC) for current, forecast, or historical.
-            opacity (float, optional): Opacity of the layer (0 to 1).
-            palette (str, optional): Custom palette string in format value:HEX;value:HEX.
-            fill_bound (bool, optional): Whether to fill values outside specified set.
-            arrow_step (int, optional): Step in pixels for wind arrows (only for 'WND' layer).
-            use_norm (bool, optional): Whether to normalize wind arrows (only for 'WND' layer).
+            lat (float): Latitude
+            lng (float): Longitude
+            layer (str): Weather map layer (e.g., 'TA2', 'PA0', 'WND', etc.)
+            zoom (int): Zoom level
+            date (int, optional): Unix timestamp (UTC) for current, forecast, or historical
+            opacity (float, optional): Opacity of the layer (0 to 1)
+            palette (str, optional): Custom palette string in format value:HEX;value:HEX
+            fill_bound (bool, optional): Whether to fill values outside specified set
+            arrow_step (int, optional): Step in pixels for wind arrows (only for 'WND' layer)
+            use_norm (bool, optional): Whether to normalize wind arrows (only for 'WND' layer)
 
         Returns:
-            str: Fully formatted map tile URL.
+            Dict with map URL information
         """
-        x,y = self.get_tile_coordinates(lat=x,lng=y,zoom=z)
-        base_url = f"http://maps.openweathermap.org/maps/2.0/weather/{layer}/{z}/{x}/{y}"
+        # Get tile coordinates from lat/lng
+        x, y = OpenWeatherAPI.get_tile_coordinates(lat=lat, lng=lng, zoom=zoom)
+        
+        base_url = f"http://maps.openweathermap.org/maps/2.0/weather/{layer}/{zoom}/{x}/{y}"
+        
         params = {
-            "appid": self.API_KEY,
+            "appid": OpenWeatherAPI.API_KEY,
             "opacity": opacity,
             "fill_bound": str(fill_bound).lower()
         }
@@ -305,41 +677,45 @@ class OpenWeatherAPI:
             params["use_norm"] = str(use_norm).lower()
 
         query = "&".join(f"{key}={value}" for key, value in params.items())
-        import IPython.display as display
-        url = f"{base_url}?{query}"
-        # Assuming 'url' variable from the previous code cell is still in scope
-        display.Image(url=url)
-        response = requests.get(url)
-        if response.status_code == 200:
-            image = Image.open(BytesIO(response.content))
-            image.save("weather_map.png", "PNG")
-        return f"{base_url}?{query}"
+        full_url = f"{base_url}?{query}"
+        
+        # Return map info as a JSON object
+        return {
+            "url": full_url,
+            "layer": layer,
+            "coordinates": {
+                "lat": lat,
+                "lng": lng,
+                "tile_x": x,
+                "tile_y": y,
+                "zoom": zoom
+            },
+            "parameters": params
+        }
 
-instance = OpenWeatherAPI()
-weather = OpenWeatherAPI.get_current_weather("Nagpur", "MH", "IN")
-print(weather)
-forecast = OpenWeatherAPI.get_hourly_forecast("Nagpur", "MH", "IN")
-print(forecast)
-daily_forecast = OpenWeatherAPI.get_daily_forecast("Nagpur", "MH", "IN", cnt=7)
-print(daily_forecast)
-historical_weather = OpenWeatherAPI.get_historical_weather("Nagpur", "MH", "IN", start_date="2025-03-01", end_date="2025-03-31")
-print(historical_weather)
-
-url = OpenWeatherAPI.get_weather_map_url(
-    instance,
-    layer="TA2",                  # Air temperature at 2 meters layer
-    z=4,
-    x=21,                    # Approximate tile x for Pune
-    y=78,                    # Approximate tile y for Pune
-    date=int(time.time()),        # Current timestamp (will round to previous 3-hr interval)
-    opacity=0.6,
-    fill_bound=True,
-    palette="-65:821692;-55:821692;-45:821692;0:23dddd;10:c2ff28;20:fff028;30:fc8014"
-)
-
-print(url)
-
-import IPython.display as display
-
-# Assuming 'url' variable from the previous code cell is still in scope
-display.Image(url=url)
+# Example usage:
+if __name__ == "__main__":
+    # Get current weather
+    weather = OpenWeatherAPI.get_current_weather("Nagpur", "MH", "IN")
+    print("Current weather:", weather)
+    
+    # Get condensed hourly forecast
+    forecast = OpenWeatherAPI.get_hourly_forecast_condensed("Nagpur", "MH", "IN", interval_hours=6)
+    print("Condensed hourly forecast:", forecast)
+    
+    # Get condensed daily forecast
+    daily_forecast = OpenWeatherAPI.get_daily_forecast_condensed("Nagpur", "MH", "IN", cnt=7)
+    print("Condensed daily forecast:", daily_forecast)
+    
+    # Get condensed historical weather (daily intervals)
+    historical_weather = OpenWeatherAPI.get_historical_weather_condensed(
+        "Nagpur", "MH", "IN", 
+        start_date="2025-03-01", 
+        end_date="2025-03-31",
+        interval_hours=24  # Daily intervals
+    )
+    print("Condensed historical weather:", historical_weather)
+    
+    # Get condensed air pollution data
+    air_pollution = OpenWeatherAPI.get_air_pollution_condensed("Nagpur", "MH", "IN")
+    print("Condensed air pollution data:", air_pollution)

@@ -253,11 +253,11 @@ class WeatherAPIUtils:
             return str(e)
         
 # Example usage
-# if __name__ == "__main__":
+if __name__ == "__main__":
 
-#     data = WeatherAPIUtils.new_get_monthly_rainfall(
-#         location="New York, USA",
-#         year="2023",
-#         save_path="./weather_data"
-#     )
-#     print(data)
+    data = WeatherAPIUtils.new_get_monthly_rainfall(
+        location="New York, USA",
+        year="2023",
+        save_path="./weather_data"
+    )
+    print(data)

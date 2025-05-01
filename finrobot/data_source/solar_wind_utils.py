@@ -8,7 +8,10 @@ for renewable energy suitability assessment.
 This class combines functionality from the previous agent implementation into a single class
 with static methods for easier use and integration.
 """
-
+import os
+from typing import List
+from pydantic import BaseModel
+from openai import OpenAI
 import sys
 import os
 import argparse
@@ -25,6 +28,31 @@ import base64
 from dotenv import load_dotenv
 
 load_dotenv()
+# Access variables
+API_KEY = os.getenv("API_KEY")
+BASE_URL = os.getenv("BASE_URL")
+# Initialize the OpenAI client
+client = OpenAI(api_key=API_KEY, base_url=BASE_URL)
+# Define a response model matching the static method output
+# Define structured response models for solar and wind energy
+class SolarEnergy(BaseModel):
+    average_daily_radiation: float
+    suitability: str
+    estimated_annual_production: int
+    confidence: str
+
+class WindEnergy(BaseModel):
+    average_wind_speed: float
+    suitability: str
+    estimated_annual_production: int
+    confidence: str
+
+# Combined assessment model
+class RenewableEnergyAssessment(BaseModel):
+    timestamp: str
+    solar_energy: SolarEnergy
+    wind_energy: WindEnergy
+    overall_recommendation: str
 
 class SolarWind:
     """
@@ -35,7 +63,7 @@ class SolarWind:
     # Constants
     VERSION = "3.0.0"
     NAME = "SolarWind Renewable Energy Assessment Tool"
-    OPENWEATHERMAP_API_KEY = os.getenv("OPENWEATHERMAP_API_KEY")
+    OPENWEATHERMAP_API_KEY = os.getenv("OWM_API_KEY")
     OPEN_METEO_BASE_URL = "https://api.open-meteo.com/v1/forecast"
     OPENWEATHERMAP_BASE_URL = "https://api.openweathermap.org/data"
     
@@ -196,7 +224,7 @@ class SolarWind:
             return f"{latitude}, {longitude}"
     
     @staticmethod
-    def get_data(location, start_date=None, end_date=None, force_owm=False, output_file=None):
+    def get_data(location, start_date=None, end_date=None, force_owm=True, output_file=None):
         """
         Retrieve solar irradiance and wind data for a given location.
         
@@ -226,7 +254,7 @@ class SolarWind:
             
             # Set default dates if not provided
             if not start_date:
-                start_date = (datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+                start_date = (datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
             if not end_date:
                 end_date = datetime.now().strftime('%Y-%m-%d')
             
@@ -828,7 +856,7 @@ class SolarWind:
                 formatted_data["wind"] = SolarWind._format_wind_data(wind_data)
             
             # Add renewable energy suitability assessment
-            formatted_data["renewable_energy_assessment"] = SolarWind._assess_renewable_energy_suitability(
+            formatted_data["renewable_energy_assessment"] = SolarWind.assess_renewable_energy_suitability(
                 formatted_data["solar_irradiance"], 
                 formatted_data["wind"]
             )
@@ -882,32 +910,42 @@ class SolarWind:
             
             # Extract hourly data
             times = solar_data["hourly"]["time"]
-            direct_radiation = solar_data["hourly"].get("direct_radiation", [None] * len(times))
-            diffuse_radiation = solar_data["hourly"].get("diffuse_radiation", [None] * len(times))
-            direct_normal_irradiance = solar_data["hourly"].get("direct_normal_irradiance", [None] * len(times))
-            shortwave_radiation = solar_data["hourly"].get("shortwave_radiation", [None] * len(times))
+            direct = np.array(solar_data["hourly"].get("direct_radiation", [np.nan]*len(times)))
+            diffuse = np.array(solar_data["hourly"].get("diffuse_radiation", [np.nan]*len(times)))
+            dni = np.array(solar_data["hourly"].get("direct_normal_irradiance", [np.nan]*len(times)))
+            shortwave = np.array(solar_data["hourly"].get("shortwave_radiation", [np.nan]*len(times)))
             
-            # Combine data
-            for i in range(len(times)):
-                # Calculate global horizontal irradiance (GHI) if possible
+            # Dimensionality reduction: take 24-hour average per day
+            df = pd.DataFrame({
+                "time": pd.to_datetime(times),
+                "direct": direct,
+                "diffuse": diffuse,
+                "dni": dni,
+                "shortwave": shortwave
+            })
+            df["day"] = df["time"].dt.date
+            daily_avg = df.groupby("day").mean(numeric_only=True).reset_index()
+
+            formatted_data = []
+            for _, row in daily_avg.iterrows():
                 ghi = None
-                if direct_radiation[i] is not None and diffuse_radiation[i] is not None:
-                    ghi = direct_radiation[i] + diffuse_radiation[i]
-                elif shortwave_radiation[i] is not None:
-                    ghi = shortwave_radiation[i]
-                
-                data_point = {
-                    "time": times[i],
-                    "direct_radiation": direct_radiation[i] if i < len(direct_radiation) else None,
-                    "diffuse_radiation": diffuse_radiation[i] if i < len(diffuse_radiation) else None,
-                    "direct_normal_irradiance": direct_normal_irradiance[i] if i < len(direct_normal_irradiance) else None,
-                    "shortwave_radiation": shortwave_radiation[i] if i < len(shortwave_radiation) else None,
-                    "global_horizontal_irradiance": ghi
-                }
-                
-                formatted_solar["data"].append(data_point)
-            
+                if not np.isnan(row["direct"]) and not np.isnan(row["diffuse"]):
+                    ghi = row["direct"] + row["diffuse"]
+                elif not np.isnan(row["shortwave"]):
+                    ghi = row["shortwave"]
+
+                formatted_data.append({
+                    "date": str(row["day"]),
+                    "direct_radiation": round(row["direct"], 2) if not np.isnan(row["direct"]) else None,
+                    "diffuse_radiation": round(row["diffuse"], 2) if not np.isnan(row["diffuse"]) else None,
+                    "direct_normal_irradiance": round(row["dni"], 2) if not np.isnan(row["dni"]) else None,
+                    "shortwave_radiation": round(row["shortwave"], 2) if not np.isnan(row["shortwave"]) else None,
+                    "global_horizontal_irradiance": round(ghi, 2) if ghi is not None else None
+                })
+
+            formatted_solar["data"] = formatted_data
             return formatted_solar
+
             
         except Exception as e:
             raise ValueError(f"Error formatting solar data: {str(e)}")
@@ -956,191 +994,63 @@ class SolarWind:
             
             # Extract hourly data
             times = wind_data["hourly"]["time"]
-            wind_speed_10m = wind_data["hourly"].get("wind_speed_10m", [None] * len(times))
-            wind_speed_100m = wind_data["hourly"].get("wind_speed_100m", [None] * len(times))
-            wind_direction_10m = wind_data["hourly"].get("wind_direction_10m", [None] * len(times))
-            wind_direction_100m = wind_data["hourly"].get("wind_direction_100m", [None] * len(times))
-            wind_gusts_10m = wind_data["hourly"].get("wind_gusts_10m", [None] * len(times))
-            
-            # Combine data
-            for i in range(len(times)):
-                data_point = {
-                    "time": times[i],
-                    "wind_speed_10m": wind_speed_10m[i] if i < len(wind_speed_10m) else None,
-                    "wind_speed_100m": wind_speed_100m[i] if i < len(wind_speed_100m) else None,
-                    "wind_direction_10m": wind_direction_10m[i] if i < len(wind_direction_10m) else None,
-                    "wind_direction_100m": wind_direction_100m[i] if i < len(wind_direction_100m) else None,
-                    "wind_gusts_10m": wind_gusts_10m[i] if i < len(wind_gusts_10m) else None
-                }
-                
-                formatted_wind["data"].append(data_point)
-            
+            ws10 = np.array(wind_data["hourly"].get("wind_speed_10m", [np.nan]*len(times)))
+            ws100 = np.array(wind_data["hourly"].get("wind_speed_100m", [np.nan]*len(times)))
+            wd10 = np.array(wind_data["hourly"].get("wind_direction_10m", [np.nan]*len(times)))
+            wd100 = np.array(wind_data["hourly"].get("wind_direction_100m", [np.nan]*len(times)))
+            gust = np.array(wind_data["hourly"].get("wind_gusts_10m", [np.nan]*len(times)))
+
+            df = pd.DataFrame({
+                "time": pd.to_datetime(times),
+                "ws10": ws10,
+                "ws100": ws100,
+                "wd10": wd10,
+                "wd100": wd100,
+                "gust": gust
+            })
+            df["day"] = df["time"].dt.date
+            daily_avg = df.groupby("day").mean(numeric_only=True).reset_index()
+
+            formatted_data = []
+            for _, row in daily_avg.iterrows():
+                formatted_data.append({
+                    "date": str(row["day"]),
+                    "wind_speed_10m": round(row["ws10"], 2) if not np.isnan(row["ws10"]) else None,
+                    "wind_speed_100m": round(row["ws100"], 2) if not np.isnan(row["ws100"]) else None,
+                    "wind_direction_10m": round(row["wd10"], 2) if not np.isnan(row["wd10"]) else None,
+                    "wind_direction_100m": round(row["wd100"], 2) if not np.isnan(row["wd100"]) else None,
+                    "wind_gusts_10m": round(row["gust"], 2) if not np.isnan(row["gust"]) else None
+                })
+
+            formatted_wind["data"] = formatted_data
             return formatted_wind
-            
+
         except Exception as e:
             raise ValueError(f"Error formatting wind data: {str(e)}")
     
-    @staticmethod
-    def _assess_renewable_energy_suitability(solar_data, wind_data):
-        """
-        Assess the suitability of a location for renewable energy based on solar and wind data.
-        
-        Args:
-            solar_data (dict): Formatted solar data
-            wind_data (dict): Formatted wind data
-        
-        Returns:
-            dict: Renewable energy suitability assessment
-        """
-        assessment = {
-            "timestamp": datetime.now().isoformat(),
-            "solar_energy": {
-                "average_daily_radiation": None,
-                "suitability": None,
-                "estimated_annual_production": None,
-                "confidence": "low"
-            },
-            "wind_energy": {
-                "average_wind_speed": None,
-                "suitability": None,
-                "estimated_annual_production": None,
-                "confidence": "low"
-            },
-            "overall_recommendation": None
-        }
-        
-        # Process solar data if available
-        if "data" in solar_data and solar_data["data"]:
-            # Calculate average daily radiation (kWh/m²/day)
-            total_radiation = 0
-            count = 0
-            
-            for point in solar_data["data"]:
-                if point["global_horizontal_irradiance"] is not None:
-                    # Convert W/m² to kWh/m² (assuming hourly data)
-                    total_radiation += point["global_horizontal_irradiance"] / 1000
-                    count += 1
-            
-            if count > 0:
-                # Calculate daily average (assuming 24 hours of data per day)
-                avg_daily_radiation = total_radiation / (count / 24)
-                assessment["solar_energy"]["average_daily_radiation"] = round(avg_daily_radiation, 2)
-                
-                # Assess suitability
-                if avg_daily_radiation >= SolarWind.SOLAR_THRESHOLDS["excellent"]:
-                    suitability = "Excellent"
-                elif avg_daily_radiation >= SolarWind.SOLAR_THRESHOLDS["good"]:
-                    suitability = "Good"
-                elif avg_daily_radiation >= SolarWind.SOLAR_THRESHOLDS["moderate"]:
-                    suitability = "Moderate"
-                elif avg_daily_radiation >= SolarWind.SOLAR_THRESHOLDS["poor"]:
-                    suitability = "Poor"
-                else:
-                    suitability = "Unsuitable"
-                
-                assessment["solar_energy"]["suitability"] = suitability
-                
-                # Estimate annual production (kWh/kW)
-                # Rough estimate: 1 kW of solar panels produces about 4 kWh per day for each kWh/m²/day of radiation
-                annual_production = avg_daily_radiation * 365 * 4
-                assessment["solar_energy"]["estimated_annual_production"] = round(annual_production)
-                
-                # Set confidence based on data points
-                if count >= 168:  # At least 7 days of hourly data
-                    assessment["solar_energy"]["confidence"] = "high"
-                elif count >= 72:  # At least 3 days of hourly data
-                    assessment["solar_energy"]["confidence"] = "medium"
-        
-        # Process wind data if available
-        if "data" in wind_data and wind_data["data"]:
-            # Calculate average wind speed
-            total_wind_speed = 0
-            count = 0
-            
-            for point in wind_data["data"]:
-                if point["wind_speed_10m"] is not None:
-                    total_wind_speed += point["wind_speed_10m"]
-                    count += 1
-            
-            if count > 0:
-                avg_wind_speed = total_wind_speed / count
-                assessment["wind_energy"]["average_wind_speed"] = round(avg_wind_speed, 2)
-                
-                # Assess suitability
-                if avg_wind_speed >= SolarWind.WIND_THRESHOLDS["excellent"]:
-                    suitability = "Excellent"
-                elif avg_wind_speed >= SolarWind.WIND_THRESHOLDS["good"]:
-                    suitability = "Good"
-                elif avg_wind_speed >= SolarWind.WIND_THRESHOLDS["moderate"]:
-                    suitability = "Moderate"
-                elif avg_wind_speed >= SolarWind.WIND_THRESHOLDS["poor"]:
-                    suitability = "Poor"
-                else:
-                    suitability = "Unsuitable"
-                
-                assessment["wind_energy"]["suitability"] = suitability
-                
-                # Estimate annual production (kWh/kW)
-                # Rough estimate based on wind speed cubed relationship
-                # Assuming a 1 kW turbine at 10m height
-                if avg_wind_speed >= 3.0:  # Minimum wind speed for most turbines
-                    capacity_factor = min(0.45, 0.05 * (avg_wind_speed ** 2))  # Simplified capacity factor calculation
-                    annual_production = capacity_factor * 8760  # 8760 hours in a year
-                    assessment["wind_energy"]["estimated_annual_production"] = round(annual_production)
-                else:
-                    assessment["wind_energy"]["estimated_annual_production"] = 0
-                
-                # Set confidence based on data points
-                if count >= 168:  # At least 7 days of hourly data
-                    assessment["wind_energy"]["confidence"] = "high"
-                elif count >= 72:  # At least 3 days of hourly data
-                    assessment["wind_energy"]["confidence"] = "medium"
-        
-        # Overall recommendation
-        solar_score = 0
-        wind_score = 0
-        
-        if assessment["solar_energy"]["suitability"] == "Excellent":
-            solar_score = 4
-        elif assessment["solar_energy"]["suitability"] == "Good":
-            solar_score = 3
-        elif assessment["solar_energy"]["suitability"] == "Moderate":
-            solar_score = 2
-        elif assessment["solar_energy"]["suitability"] == "Poor":
-            solar_score = 1
-        
-        if assessment["wind_energy"]["suitability"] == "Excellent":
-            wind_score = 4
-        elif assessment["wind_energy"]["suitability"] == "Good":
-            wind_score = 3
-        elif assessment["wind_energy"]["suitability"] == "Moderate":
-            wind_score = 2
-        elif assessment["wind_energy"]["suitability"] == "Poor":
-            wind_score = 1
-        
-        if solar_score > 0 or wind_score > 0:
-            if solar_score >= 3 and wind_score >= 3:
-                assessment["overall_recommendation"] = "Excellent location for hybrid solar and wind energy systems"
-            elif solar_score >= 3:
-                assessment["overall_recommendation"] = "Excellent location for solar energy, " + (
-                    "with potential for supplementary wind energy" if wind_score > 0 else "but not suitable for wind energy"
-                )
-            elif wind_score >= 3:
-                assessment["overall_recommendation"] = "Excellent location for wind energy, " + (
-                    "with potential for supplementary solar energy" if solar_score > 0 else "but not suitable for solar energy"
-                )
-            elif solar_score >= 2 and wind_score >= 2:
-                assessment["overall_recommendation"] = "Moderate potential for hybrid solar and wind energy systems"
-            elif solar_score >= 2:
-                assessment["overall_recommendation"] = "Moderate potential for solar energy, limited potential for wind energy"
-            elif wind_score >= 2:
-                assessment["overall_recommendation"] = "Moderate potential for wind energy, limited potential for solar energy"
-            else:
-                assessment["overall_recommendation"] = "Limited potential for renewable energy, consider other locations or energy sources"
-        else:
-            assessment["overall_recommendation"] = "Insufficient data to make a recommendation"
-        
-        return assessment
+    @staticmethod 
+    def assess_renewable_energy_suitability(solar_data, wind_data):
+        # Use a large language model to generate a realistic assessment
+        completion = client.beta.chat.completions.parse(
+            model="gemini-2.0-flash",
+            messages=[
+                {"role": "system", "content": \
+                    "You are a leading renewable energy analyst. "  \
+                    "Given detailed solar and wind datasets, compute key metrics, compare against industry thresholds, "  \
+                    "and critically evaluate suitability. "  \
+                    "If the input data contradicts known norms, prioritize the more reliable source. "  \
+                    "Return a single JSON object matching the RenewableEnergyAssessment schema with these fields:\n"  \
+                    "- timestamp (ISO 8601)\n"  \
+                    "- solar_energy: { average_daily_radiation (kWh/m²/day), suitability (Excellent|Good|Moderate|Poor|Unsuitable), estimated_annual_production (kWh/kW), confidence (High|Medium|Low) }\n"  \
+                    "- wind_energy: { average_wind_speed (m/s), suitability (Excellent|Good|Moderate|Poor|Unsuitable), estimated_annual_production (kWh/kW), confidence (High|Medium|Low) }\n"  \
+                    "- overall_recommendation: concise summary."},
+                {"role": "user", "content": f"Solar data: {json.dumps(solar_data)}; Wind data: {json.dumps(wind_data)}"},
+            ],
+            response_format=RenewableEnergyAssessment,
+        )
+        # Parsed result will be an instance of RenewableEnergyAssessment
+        return completion.choices[0].message.parsed.json()
+
     
     @staticmethod
     def _save_to_json_file(data, file_path):
@@ -1159,388 +1069,175 @@ class SolarWind:
                 json.dump(data, f, indent=2)
         except Exception as e:
             raise ValueError(f"Error saving data to file: {str(e)}")
-    
+
+
     @staticmethod
-    def visualize_solar_data(data, output_file=None):
-        """
-        Visualize solar irradiance data.
-        
-        Args:
-            data (dict): Solar and wind data from get_data method
-            output_file (str, optional): Path to save the visualization. Defaults to None.
-        
-        Returns:
-            str or None: If output_file is None, returns a base64 encoded image.
-                        Otherwise, saves the image to the specified file.
-        
-        Raises:
-            ValueError: If there's an error creating the visualization
-        """
+    def visualize_solar_data(json_data, output_file=None):
         try:
-            # Check if solar data is available
-            if "solar_irradiance" not in data or "data" not in data["solar_irradiance"]:
+            records = json_data.get("solar_irradiance", {}).get("data")
+            if not records:
                 raise ValueError("No solar irradiance data available for visualization")
-            
-            # Extract data
-            solar_data = data["solar_irradiance"]["data"]
-            location_name = data["location"]["name"]
-            
-            # Convert to pandas DataFrame
-            df = pd.DataFrame(solar_data)
-            df["time"] = pd.to_datetime(df["time"])
-            
-            # Set up the figure
+
+            df = pd.DataFrame(records)
+            # parse timestamp
+            if "date" in df.columns:
+                df["timestamp"] = pd.to_datetime(df["date"])
+            elif "time" in df.columns:
+                df["timestamp"] = pd.to_datetime(df["time"])
+            else:
+                raise ValueError("No date/time column found in solar data")
+
+            location_name = json_data.get("location", {}).get("name", "Unknown Location")
+
             plt.figure(figsize=(12, 8))
-            
-            # Plot global horizontal irradiance
             plt.subplot(2, 1, 1)
-            plt.plot(df["time"], df["global_horizontal_irradiance"], 'r-', label='Global Horizontal Irradiance')
-            plt.title(f'Solar Irradiance Data for {location_name}')
-            plt.ylabel('Irradiance (W/m²)')
-            plt.grid(True, alpha=0.3)
+            plt.plot(df["timestamp"], df.get("global_horizontal_irradiance", []), label='GHI')
+            plt.title(f'Solar Irradiance for {location_name}')
+            plt.ylabel('W/m²')
+            plt.grid(alpha=0.3)
             plt.legend()
-            
-            # Format x-axis
-            plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M'))
+            plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
             plt.gcf().autofmt_xdate()
-            
-            # Plot direct and diffuse radiation
+
             plt.subplot(2, 1, 2)
-            plt.plot(df["time"], df["direct_radiation"], 'b-', label='Direct Radiation')
-            plt.plot(df["time"], df["diffuse_radiation"], 'g-', label='Diffuse Radiation')
-            plt.xlabel('Time')
-            plt.ylabel('Radiation (W/m²)')
-            plt.grid(True, alpha=0.3)
+            if "direct_radiation" in df.columns:
+                plt.plot(df["timestamp"], df["direct_radiation"], label='Direct')
+            if "diffuse_radiation" in df.columns:
+                plt.plot(df["timestamp"], df["diffuse_radiation"], label='Diffuse')
+            plt.xlabel('Date')
+            plt.ylabel('W/m²')
+            plt.grid(alpha=0.3)
             plt.legend()
-            
-            # Format x-axis
-            plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M'))
+            plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
             plt.gcf().autofmt_xdate()
-            
-            # Add assessment information
-            if "renewable_energy_assessment" in data and "solar_energy" in data["renewable_energy_assessment"]:
-                assessment = data["renewable_energy_assessment"]["solar_energy"]
-                avg_radiation = assessment.get("average_daily_radiation", "N/A")
-                suitability = assessment.get("suitability", "N/A")
-                annual_production = assessment.get("estimated_annual_production", "N/A")
-                
-                info_text = (
-                    f"Average Daily Radiation: {avg_radiation} kWh/m²/day\n"
-                    f"Suitability for Solar Energy: {suitability}\n"
-                    f"Estimated Annual Production: {annual_production} kWh/kW"
-                )
-                
-                plt.figtext(0.5, 0.01, info_text, ha='center', fontsize=12, 
-                           bbox={"facecolor":"orange", "alpha":0.2, "pad":5})
-            
-            plt.tight_layout(rect=[0, 0.05, 1, 0.95])
-            
-            # Save or return the figure
+
             if output_file:
                 plt.savefig(output_file, dpi=300, bbox_inches='tight')
                 plt.close()
                 return output_file
             else:
-                # Return as base64 encoded image
                 buf = BytesIO()
                 plt.savefig(buf, format='png', dpi=300, bbox_inches='tight')
                 plt.close()
                 buf.seek(0)
-                img_str = base64.b64encode(buf.read()).decode('utf-8')
-                return img_str
-            
+                return base64.b64encode(buf.read()).decode('utf-8')
+
         except Exception as e:
-            raise ValueError(f"Error creating solar visualization: {str(e)}")
-    
+            raise ValueError(f"Error creating solar visualization: {e}")
+
     @staticmethod
-    def visualize_wind_data(data, output_file=None):
-        """
-        Visualize wind data.
-        
-        Args:
-            data (dict): Solar and wind data from get_data method
-            output_file (str, optional): Path to save the visualization. Defaults to None.
-        
-        Returns:
-            str or None: If output_file is None, returns a base64 encoded image.
-                        Otherwise, saves the image to the specified file.
-        
-        Raises:
-            ValueError: If there's an error creating the visualization
-        """
+    def visualize_wind_data(json_data, output_file=None):
         try:
-            # Check if wind data is available
-            if "wind" not in data or "data" not in data["wind"]:
+            records = json_data.get("wind", {}).get("data")
+            if not records:
                 raise ValueError("No wind data available for visualization")
-            
-            # Extract data
-            wind_data = data["wind"]["data"]
-            location_name = data["location"]["name"]
-            
-            # Convert to pandas DataFrame
-            df = pd.DataFrame(wind_data)
-            df["time"] = pd.to_datetime(df["time"])
-            
-            # Set up the figure
+
+            df = pd.DataFrame(records)
+            if "date" in df.columns:
+                df["timestamp"] = pd.to_datetime(df["date"])
+            elif "time" in df.columns:
+                df["timestamp"] = pd.to_datetime(df["time"])
+            else:
+                raise ValueError("No date/time column found in wind data")
+
+            location_name = json_data.get("location", {}).get("name", "Unknown Location")
+
             plt.figure(figsize=(12, 8))
-            
-            # Plot wind speed at 10m
             plt.subplot(2, 1, 1)
-            plt.plot(df["time"], df["wind_speed_10m"], 'b-', label='Wind Speed at 10m')
-            if "wind_speed_100m" in df.columns and not df["wind_speed_100m"].isna().all():
-                plt.plot(df["time"], df["wind_speed_100m"], 'g-', label='Wind Speed at 100m')
-            plt.title(f'Wind Data for {location_name}')
-            plt.ylabel('Wind Speed (m/s)')
-            plt.grid(True, alpha=0.3)
+            plt.plot(df["timestamp"], df.get("wind_speed_10m", []), label='Speed 10m')
+            if "wind_speed_100m" in df.columns:
+                plt.plot(df["timestamp"], df["wind_speed_100m"], label='Speed 100m')
+            plt.title(f'Wind Speed for {location_name}')
+            plt.ylabel('m/s')
+            plt.grid(alpha=0.3)
             plt.legend()
-            
-            # Add horizontal lines for wind energy thresholds
-            plt.axhline(y=SolarWind.WIND_THRESHOLDS["excellent"], color='r', linestyle='--', alpha=0.5, 
-                       label=f'Excellent Threshold ({SolarWind.WIND_THRESHOLDS["excellent"]} m/s)')
-            plt.axhline(y=SolarWind.WIND_THRESHOLDS["good"], color='g', linestyle='--', alpha=0.5, 
-                       label=f'Good Threshold ({SolarWind.WIND_THRESHOLDS["good"]} m/s)')
-            plt.axhline(y=SolarWind.WIND_THRESHOLDS["moderate"], color='y', linestyle='--', alpha=0.5, 
-                       label=f'Moderate Threshold ({SolarWind.WIND_THRESHOLDS["moderate"]} m/s)')
-            plt.legend()
-            
-            # Format x-axis
-            plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M'))
+            plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
             plt.gcf().autofmt_xdate()
-            
-            # Plot wind direction at 10m
+
             plt.subplot(2, 1, 2)
-            plt.scatter(df["time"], df["wind_direction_10m"], c=df["wind_speed_10m"], 
-                      cmap='viridis', alpha=0.7, s=20)
-            plt.colorbar(label='Wind Speed (m/s)')
-            plt.xlabel('Time')
-            plt.ylabel('Wind Direction (degrees)')
-            plt.grid(True, alpha=0.3)
-            
-            # Format x-axis
-            plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d %H:%M'))
-            plt.gcf().autofmt_xdate()
-            
-            # Add assessment information
-            if "renewable_energy_assessment" in data and "wind_energy" in data["renewable_energy_assessment"]:
-                assessment = data["renewable_energy_assessment"]["wind_energy"]
-                avg_speed = assessment.get("average_wind_speed", "N/A")
-                suitability = assessment.get("suitability", "N/A")
-                annual_production = assessment.get("estimated_annual_production", "N/A")
-                
-                info_text = (
-                    f"Average Wind Speed: {avg_speed} m/s\n"
-                    f"Suitability for Wind Energy: {suitability}\n"
-                    f"Estimated Annual Production: {annual_production} kWh/kW"
-                )
-                
-                plt.figtext(0.5, 0.01, info_text, ha='center', fontsize=12, 
-                           bbox={"facecolor":"lightblue", "alpha":0.2, "pad":5})
-            
-            plt.tight_layout(rect=[0, 0.05, 1, 0.95])
-            
-            # Save or return the figure
+            if "wind_direction_10m" in df.columns:
+                plt.scatter(df["timestamp"], df["wind_direction_10m"], s=20)
+            plt.xlabel('Date')
+            plt.ylabel('°')
+            plt.grid(alpha=0.3)
+
             if output_file:
                 plt.savefig(output_file, dpi=300, bbox_inches='tight')
                 plt.close()
                 return output_file
             else:
-                # Return as base64 encoded image
                 buf = BytesIO()
                 plt.savefig(buf, format='png', dpi=300, bbox_inches='tight')
                 plt.close()
                 buf.seek(0)
-                img_str = base64.b64encode(buf.read()).decode('utf-8')
-                return img_str
-            
+                return base64.b64encode(buf.read()).decode('utf-8')
+
         except Exception as e:
-            raise ValueError(f"Error creating wind visualization: {str(e)}")
-    
+            raise ValueError(f"Error creating wind visualization: {e}")
+
     @staticmethod
-    def visualize_renewable_energy_potential(data, output_file=None):
-        """
-        Visualize renewable energy potential.
-        
-        Args:
-            data (dict): Solar and wind data from get_data method
-            output_file (str, optional): Path to save the visualization. Defaults to None.
-        
-        Returns:
-            str or None: If output_file is None, returns a base64 encoded image.
-                        Otherwise, saves the image to the specified file.
-        
-        Raises:
-            ValueError: If there's an error creating the visualization
-        """
+    def visualize_renewable_energy_potential(json_data, output_file=None):
         try:
-            # Check if assessment data is available
-            if "renewable_energy_assessment" not in data:
-                raise ValueError("No renewable energy assessment data available for visualization")
-            
-            # Extract data
-            assessment = data["renewable_energy_assessment"]
-            location_name = data["location"]["name"]
-            
-            # Extract solar and wind assessment
-            solar_assessment = assessment.get("solar_energy", {})
-            wind_assessment = assessment.get("wind_energy", {})
-            
-            # Get values
-            solar_avg = solar_assessment.get("average_daily_radiation", 0) or 0
-            solar_suitability = solar_assessment.get("suitability", "Unknown")
-            solar_production = solar_assessment.get("estimated_annual_production", 0) or 0
-            
-            wind_avg = wind_assessment.get("average_wind_speed", 0) or 0
-            wind_suitability = wind_assessment.get("suitability", "Unknown")
-            wind_production = wind_assessment.get("estimated_annual_production", 0) or 0
-            
-            # Set up the figure
-            plt.figure(figsize=(12, 10))
-            
-            # Create a radar chart for suitability
-            plt.subplot(2, 2, 1, polar=True)
-            
-            # Convert suitability to numeric values
-            suitability_map = {
-                "Excellent": 4,
-                "Good": 3,
-                "Moderate": 2,
-                "Poor": 1,
-                "Unsuitable": 0,
-                "Unknown": 0
-            }
-            
-            solar_value = suitability_map.get(solar_suitability, 0)
-            wind_value = suitability_map.get(wind_suitability, 0)
-            
-            # Create radar chart data
-            categories = ['Solar Energy', 'Wind Energy']
-            values = [solar_value, wind_value]
-            
-            # Number of variables
-            N = len(categories)
-            
-            # What will be the angle of each axis in the plot
-            angles = [n / float(N) * 2 * np.pi for n in range(N)]
-            angles += angles[:1]  # Close the loop
-            
-            # Add values
-            values += values[:1]  # Close the loop
-            
-            # Draw the chart
-            ax = plt.subplot(2, 2, 1, polar=True)
-            
-            # Draw one axis per variable and add labels
-            plt.xticks(angles[:-1], categories, size=10)
-            
-            # Draw ylabels
+            # parse assessment if it's a JSON string
+            assessment = json_data.get("renewable_energy_assessment")
+            if isinstance(assessment, str):
+                assessment = json.loads(assessment)
+            if not assessment:
+                raise ValueError("No assessment data available")
+
+            location_name = json_data.get("location", {}).get("name", "Unknown")
+
+            solar = assessment.get("solar_energy")
+            if isinstance(solar, str): solar = json.loads(solar)
+            wind = assessment.get("wind_energy")
+            if isinstance(wind, str): wind = json.loads(wind)
+
+            suit_map = {"Excellent":4, "Good":3, "Moderate":2, "Poor":1, "Unsuitable":0, "Unknown":0}
+            vals = [suit_map.get(solar.get("suitability"), 0), suit_map.get(wind.get("suitability"), 0)]
+            cats = ["Solar","Wind"]
+            N = len(cats)
+            angles = [n/float(N)*2*np.pi for n in range(N)] + [0]
+            vals += vals[:1]
+
+            plt.figure(figsize=(12,10))
+            ax = plt.subplot(2,2,1, polar=True)
+            plt.xticks(angles[:-1], cats)
             ax.set_rlabel_position(0)
-            plt.yticks([1, 2, 3, 4], ["Poor", "Moderate", "Good", "Excellent"], color="grey", size=8)
-            plt.ylim(0, 4)
-            
-            # Plot data
-            ax.plot(angles, values, linewidth=2, linestyle='solid')
-            
-            # Fill area
-            ax.fill(angles, values, 'b', alpha=0.1)
-            
-            plt.title('Renewable Energy Suitability', size=14)
-            
-            # Bar chart for estimated annual production
-            plt.subplot(2, 2, 2)
-            sources = ['Solar Energy', 'Wind Energy']
-            production = [solar_production, wind_production]
-            
-            bars = plt.bar(sources, production, color=['orange', 'skyblue'])
-            
-            # Add values on top of bars
-            for bar in bars:
-                height = bar.get_height()
-                plt.text(bar.get_x() + bar.get_width()/2., height + 50,
-                        f'{int(height)}',
-                        ha='center', va='bottom', rotation=0, size=10)
-            
-            plt.title('Estimated Annual Production (kWh/kW)')
-            plt.ylabel('kWh/kW')
-            plt.grid(axis='y', alpha=0.3)
-            
-            # Daily profile of solar radiation
-            plt.subplot(2, 2, 3)
-            
-            if "solar_irradiance" in data and "data" in data["solar_irradiance"]:
-                solar_data = data["solar_irradiance"]["data"]
-                df = pd.DataFrame(solar_data)
-                df["time"] = pd.to_datetime(df["time"])
-                
-                # Extract hour of day
-                df["hour"] = df["time"].dt.hour
-                
-                # Group by hour and calculate average
-                hourly_avg = df.groupby("hour")["global_horizontal_irradiance"].mean()
-                
-                # Plot hourly average
-                plt.plot(hourly_avg.index, hourly_avg.values, 'r-', marker='o')
-                plt.title('Average Daily Solar Radiation Profile')
-                plt.xlabel('Hour of Day')
-                plt.ylabel('Global Horizontal Irradiance (W/m²)')
-                plt.grid(True, alpha=0.3)
-                plt.xticks(range(0, 24, 2))
-            else:
-                plt.text(0.5, 0.5, 'No solar data available', ha='center', va='center')
-            
-            # Daily profile of wind speed
-            plt.subplot(2, 2, 4)
-            
-            if "wind" in data and "data" in data["wind"]:
-                wind_data = data["wind"]["data"]
-                df = pd.DataFrame(wind_data)
-                df["time"] = pd.to_datetime(df["time"])
-                
-                # Extract hour of day
-                df["hour"] = df["time"].dt.hour
-                
-                # Group by hour and calculate average
-                hourly_avg = df.groupby("hour")["wind_speed_10m"].mean()
-                
-                # Plot hourly average
-                plt.plot(hourly_avg.index, hourly_avg.values, 'b-', marker='o')
-                plt.title('Average Daily Wind Speed Profile')
-                plt.xlabel('Hour of Day')
-                plt.ylabel('Wind Speed at 10m (m/s)')
-                plt.grid(True, alpha=0.3)
-                plt.xticks(range(0, 24, 2))
-                
-                # Add threshold lines
-                plt.axhline(y=SolarWind.WIND_THRESHOLDS["excellent"], color='r', linestyle='--', alpha=0.5)
-                plt.axhline(y=SolarWind.WIND_THRESHOLDS["good"], color='g', linestyle='--', alpha=0.5)
-                plt.axhline(y=SolarWind.WIND_THRESHOLDS["moderate"], color='y', linestyle='--', alpha=0.5)
-            else:
-                plt.text(0.5, 0.5, 'No wind data available', ha='center', va='center')
-            
-            # Add overall recommendation
-            overall_recommendation = assessment.get("overall_recommendation", "No recommendation available")
-            plt.figtext(0.5, 0.01, f"Overall Recommendation: {overall_recommendation}", 
-                       ha='center', fontsize=12, bbox={"facecolor":"lightgreen", "alpha":0.2, "pad":5})
-            
-            plt.suptitle(f'Renewable Energy Assessment for {location_name}', fontsize=16)
-            plt.tight_layout(rect=[0, 0.05, 1, 0.95])
-            
-            # Save or return the figure
+            plt.yticks([1,2,3,4], ["Poor","Moderate","Good","Excellent"], size=8)
+            plt.ylim(0,4)
+            ax.plot(angles, vals, linewidth=2)
+            ax.fill(angles, vals, alpha=0.1)
+            plt.title("Suitability")
+
+            plt.subplot(2,2,2)
+            prods = [solar.get("estimated_annual_production",0), wind.get("estimated_annual_production",0)]
+            bars = plt.bar(cats, prods)
+            for b in bars:
+                h = b.get_height()
+                plt.text(b.get_x()+b.get_width()/2, h*1.01, str(int(h)), ha='center')
+            plt.title("Annual Production (kWh/kW)")
+
+            overall = assessment.get("overall_recommendation","None")
+            plt.figtext(0.5,0.01,f"Overall: {overall}", ha='center')
+
+            plt.suptitle(f"Renewable Assessment for {location_name}")
+            plt.tight_layout(rect=[0,0.05,1,0.95])
+
             if output_file:
                 plt.savefig(output_file, dpi=300, bbox_inches='tight')
                 plt.close()
                 return output_file
             else:
-                # Return as base64 encoded image
                 buf = BytesIO()
                 plt.savefig(buf, format='png', dpi=300, bbox_inches='tight')
                 plt.close()
                 buf.seek(0)
-                img_str = base64.b64encode(buf.read()).decode('utf-8')
-                return img_str
-            
+                return base64.b64encode(buf.read()).decode('utf-8')
+
         except Exception as e:
-            raise ValueError(f"Error creating renewable energy potential visualization: {str(e)}")
-    
+            raise ValueError(f"Error creating potential visualization: {e}")
+
+
     @staticmethod
     def run_from_command_line():
         """
@@ -1558,8 +1255,8 @@ class SolarWind:
         
         parser.add_argument(
             "--start",
-            help="Start date in YYYY-MM-DD format (default: 7 days ago)",
-            default=(datetime.now() - timedelta(days=7)).strftime('%Y-%m-%d')
+            help="Start date in YYYY-MM-DD format (default: 30 days ago)",
+            default=(datetime.now() - timedelta(days=30)).strftime('%Y-%m-%d')
         )
         
         parser.add_argument(
@@ -1574,10 +1271,12 @@ class SolarWind:
             default=None
         )
         
+        # by default OpenWeatherMap is used; to disable, pass --no-owm
         parser.add_argument(
-            "--force-owm",
-            help="Force use of OpenWeatherMap API regardless of date range",
-            action="store_true"
+            "--no-owm",
+            help="Disable default OpenWeatherMap API usage",
+            action="store_false",
+            dest="force_owm"
         )
         
         parser.add_argument(

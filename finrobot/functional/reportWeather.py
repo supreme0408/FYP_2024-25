@@ -477,6 +477,30 @@ class ReportWeatherLabUtils:
                 alignment=TA_JUSTIFY,
                 spaceBefore=4
             )
+
+            table_style = TableStyle([
+                # Header styling
+                ('BACKGROUND', (0, 0), (-1, 0), colors.darkblue),
+                ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+                ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
+                ('FONTNAME', (0, 0), (-1, 0), 'Times-Bold'),
+                ('FONTSIZE', (0, 0), (-1, 0), 11),
+                ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+                ('TOPPADDING', (0, 0), (-1, 0), 8),
+                
+                # Body styling
+                ('ALIGN', (0, 1), (-1, -1), 'CENTER'),
+                ('FONTNAME', (0, 1), (-1, -1), 'Times-Roman'),
+                ('FONTSIZE', (0, 1), (-1, -1), 10),
+                ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                
+                # Alternating row colors for readability
+                ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lightgrey]),
+                
+                # Rounded corners for the entire table
+                ('ROUNDEDCORNERS', [10, 10, 10, 10]),
+            ])
             
             # Content for PDF - skip header since we have a custom one
             content = [Spacer(1, 0.5*inch)]  # Space after header
@@ -522,31 +546,7 @@ class ReportWeatherLabUtils:
                     spaceAfter=12,
                 )
                 
-                rainfall_style = TableStyle([
-                    # Header styling
-                    ('BACKGROUND', (0, 0), (-1, 0), colors.darkblue),
-                    ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-                    ('ALIGN', (0, 0), (-1, 0), 'CENTER'),
-                    ('FONTNAME', (0, 0), (-1, 0), 'Times-Bold'),
-                    ('FONTSIZE', (0, 0), (-1, 0), 11),
-                    ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
-                    ('TOPPADDING', (0, 0), (-1, 0), 8),
-                    
-                    # Body styling
-                    ('ALIGN', (0, 1), (-1, -1), 'CENTER'),
-                    ('FONTNAME', (0, 1), (-1, -1), 'Times-Roman'),
-                    ('FONTSIZE', (0, 1), (-1, -1), 10),
-                    ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
-                    ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-                    
-                    # Alternating row colors for readability
-                    ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.lightgrey]),
-                    
-                    # Rounded corners for the entire table
-                    ('ROUNDEDCORNERS', [10, 10, 10, 10]),
-                ])
-                
-                rainfall_table.setStyle(rainfall_style)
+                rainfall_table.setStyle(table_style)
                 content.append(rainfall_table)
                 content.append(Spacer(1, 0.2*inch))
     
@@ -567,28 +567,31 @@ class ReportWeatherLabUtils:
                     spaceAfter=12,
                 )
                 # Reuse the same style for consistency
-                temperature_table.setStyle(rainfall_style)
+                temperature_table.setStyle(table_style)
                 content.append(temperature_table)
             
             content.append(PageBreak())                
 
             content.append(Paragraph("Data Summary", subtitle_style))
+            content.append(HorizontalLine(page_width - 2*margin, 1, colors.lightblue, 0, 6))
+            content.append(Spacer(1, 0.1*inch))
+
             img_buffer = ReportWeatherLabUtils.create_dashboard_pdf_page(rainfall_data_df, temp_data_df)
             
-            # Step 2: Load the image using PIL to get actual dimensions
+            # Load the image using PIL to get actual dimensions
             pil_img = PILImage.open(img_buffer)
             img_width, img_height = pil_img.size
 
-            # Step 3: Calculate new dimensions to fit A4 width while keeping aspect ratio
+            # Calculate new dimensions to fit A4 width while keeping aspect ratio
             a4_width_points = page_width - 2 * margin  # subtracting margins
             aspect_ratio = img_height / img_width
             new_width = a4_width_points
             new_height = new_width * aspect_ratio
 
-            # Step 4: Rewind buffer and create ReportLab Image
+            # Rewind buffer and create required Image
             img_buffer.seek(0)
-            img = Image(img_buffer, width=new_width, height=new_height)
-            content.append(img)
+            data_summary_img = Image(img_buffer, width=new_width, height=new_height)
+            content.append(data_summary_img)
 
             image_save_path = os.path.join(save_path, "data_summary_plot.png")
             pil_img.save(image_save_path) 

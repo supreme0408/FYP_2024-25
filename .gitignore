@@ -1,5 +1,6 @@
 tutorial_script/weather_report/
 tutorial_script/.cache/
+tutorial_script/multiagent.ipynb
 
 finrobot/__pycache__/
 finrobot/.ipynb_checkpoints/
@@ -13,6 +14,7 @@ finrobot/data_source/.ipynb_checkpoints/
 finrobot/functional/__pycache__/
 finrobot/functional/.ipynb_checkpoints/
 finrobot/functional/.cache/
+finrobot/functional/weather_plot.py
 
 
 .ipynb_checkpoints/
